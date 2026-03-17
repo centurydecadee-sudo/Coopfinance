@@ -1,0 +1,5 @@
+{
+  "name": "Coop Finance Application",
+  "description": "Unified Ledger System with Maker-Checker verification, atomic transactions, and master node accounting.",
+  "requestFramePermissions": []
+}

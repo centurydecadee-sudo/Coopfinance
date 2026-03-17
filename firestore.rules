@@ -1,0 +1,97 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "century.decadee@gmail.com" ||
+         request.auth.token.email == "ronald.narvasa.rn@gmail.com" ||
+         (exists(/databases/$(database)/documents/members/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/members/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidMember(data) {
+      return data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 128 &&
+             (data.email == "" || isValidEmail(data.email)) &&
+             data.role in ['admin', 'member'] &&
+             data.capital_share is number &&
+             data.loan_balance is number &&
+             data.created_at is string;
+    }
+
+    function isValidTransaction(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() < 128 &&
+             data.type in ['INFLOW', 'OUTFLOW'] &&
+             data.source_fund in ['BANK', 'HAND'] &&
+             data.node_category is string && data.node_category.size() > 0 &&
+             data.parent_master_node in ['LENDING', 'INCOME', 'EXPENSES', 'CAPITAL'] &&
+             data.amount is number && data.amount >= 0 &&
+             data.member_id is string &&
+             data.status in ['PENDING', 'VERIFIED', 'REJECTED'] &&
+             data.created_by is string &&
+             data.created_at is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /members/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidMember(request.resource.data) && 
+                    (isAdmin() || (isOwner(userId) && request.resource.data.role == 'member'));
+      allow update: if isAdmin() && isValidMember(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /source_funds/{fundId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /master_nodes/{nodeId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /node_registry/{categoryId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data) &&
+                    (isAdmin() || (request.resource.data.created_by == request.auth.uid && request.resource.data.status == 'PENDING'));
+      allow update: if isAdmin() && isValidTransaction(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /inventory/{itemId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

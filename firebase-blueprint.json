@@ -1,0 +1,207 @@
+{
+  "entities": {
+    "Member": {
+      "title": "Member",
+      "description": "A user of the Coop Finance system.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The unique identifier of the user, matching their Firebase Auth UID."
+        },
+        "name": {
+          "type": "string",
+          "description": "The user's full name."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "The user's email address."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "member"],
+          "description": "The user's role in the system."
+        },
+        "capital_share": {
+          "type": "number",
+          "description": "The total capital share balance of the member."
+        },
+        "loan_balance": {
+          "type": "number",
+          "description": "The total outstanding loan balance of the member."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the member was created."
+        }
+      },
+      "required": ["uid", "name", "email", "role", "capital_share", "loan_balance", "created_at"]
+    },
+    "SourceFund": {
+      "title": "Source Fund",
+      "description": "A source of liquidity (e.g., BANK or HAND).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["BANK", "HAND"],
+          "description": "The unique identifier of the source fund."
+        },
+        "balance": {
+          "type": "number",
+          "description": "The current balance of the source fund."
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the balance was last updated."
+        }
+      },
+      "required": ["id", "balance", "updated_at"]
+    },
+    "MasterNode": {
+      "title": "Master Node",
+      "description": "A high-level accounting category (e.g., LENDING, INCOME, EXPENSES, CAPITAL).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["LENDING", "INCOME", "EXPENSES", "CAPITAL"],
+          "description": "The unique identifier of the master node."
+        },
+        "balance": {
+          "type": "number",
+          "description": "The current balance of the master node."
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the balance was last updated."
+        }
+      },
+      "required": ["id", "balance", "updated_at"]
+    },
+    "NodeRegistry": {
+      "title": "Node Registry",
+      "description": "A specific category mapped to a Master Node.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the node category."
+        },
+        "name": {
+          "type": "string",
+          "description": "The display name of the node category."
+        },
+        "parent_master_node": {
+          "type": "string",
+          "enum": ["LENDING", "INCOME", "EXPENSES", "CAPITAL"],
+          "description": "The master node this category rolls up to."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the node category was created."
+        }
+      },
+      "required": ["id", "name", "parent_master_node", "created_at"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A financial transaction in the system.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the transaction."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["INFLOW", "OUTFLOW"],
+          "description": "Whether money is coming in or going out."
+        },
+        "source_fund": {
+          "type": "string",
+          "enum": ["BANK", "HAND"],
+          "description": "The source fund involved."
+        },
+        "node_category": {
+          "type": "string",
+          "description": "The specific node category for this transaction."
+        },
+        "parent_master_node": {
+          "type": "string",
+          "enum": ["LENDING", "INCOME", "EXPENSES", "CAPITAL"],
+          "description": "The master node this transaction rolls up to."
+        },
+        "amount": {
+          "type": "number",
+          "description": "The transaction amount (must be positive)."
+        },
+        "member_id": {
+          "type": "string",
+          "description": "The UID of the member this transaction is associated with."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "VERIFIED", "REJECTED"],
+          "description": "The current status of the transaction."
+        },
+        "created_by": {
+          "type": "string",
+          "description": "The UID of the user who created the transaction."
+        },
+        "verified_by": {
+          "type": "string",
+          "description": "The UID of the admin who verified or rejected the transaction."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the transaction was created."
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the transaction was verified or rejected."
+        }
+      },
+      "required": ["id", "type", "source_fund", "node_category", "parent_master_node", "amount", "member_id", "status", "created_by", "created_at"]
+    }
+  },
+  "firestore": {
+    "members/{uid}": {
+      "schema": {
+        "$ref": "#/entities/Member"
+      },
+      "description": "Stores user profiles and their individual balances."
+    },
+    "source_funds/{fundId}": {
+      "schema": {
+        "$ref": "#/entities/SourceFund"
+      },
+      "description": "Stores the balances of the main liquidity sources (BANK, HAND)."
+    },
+    "master_nodes/{nodeId}": {
+      "schema": {
+        "$ref": "#/entities/MasterNode"
+      },
+      "description": "Stores the aggregated balances of the high-level accounting categories."
+    },
+    "node_registry/{categoryId}": {
+      "schema": {
+        "$ref": "#/entities/NodeRegistry"
+      },
+      "description": "Stores the specific categories that map to Master Nodes."
+    },
+    "transactions/{transactionId}": {
+      "schema": {
+        "$ref": "#/entities/Transaction"
+      },
+      "description": "Stores all financial transactions, including pending, verified, and rejected ones."
+    }
+  }
+}
