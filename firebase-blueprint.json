@@ -13,6 +13,21 @@
           "type": "string",
           "description": "The user's full name."
         },
+        "last_name": {
+          "type": "string"
+        },
+        "first_name": {
+          "type": "string"
+        },
+        "registered_name": {
+          "type": "string"
+        },
+        "plate_no": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        },
         "email": {
           "type": "string",
           "format": "email",
@@ -25,11 +40,27 @@
         },
         "capital_share": {
           "type": "number",
-          "description": "The total capital share balance of the member."
+          "description": "The base capital share."
+        },
+        "refund": {
+          "type": "number"
+        },
+        "capital_build_up": {
+          "type": "number"
+        },
+        "total_capital_share": {
+          "type": "number",
+          "description": "The final capital share balance."
         },
         "loan_balance": {
           "type": "number",
           "description": "The total outstanding loan balance of the member."
+        },
+        "dividend": {
+          "type": "number"
+        },
+        "gender": {
+          "type": "string"
         },
         "created_at": {
           "type": "string",
@@ -37,7 +68,7 @@
           "description": "The timestamp when the member was created."
         }
       },
-      "required": ["uid", "name", "email", "role", "capital_share", "loan_balance", "created_at"]
+      "required": ["uid", "name", "role", "total_capital_share", "loan_balance", "created_at"]
     },
     "SourceFund": {
       "title": "Source Fund",

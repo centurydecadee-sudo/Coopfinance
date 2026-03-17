@@ -177,10 +177,20 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 type Member = {
   uid: string;
   name: string;
-  email: string;
+  last_name?: string;
+  first_name?: string;
+  registered_name?: string;
+  plate_no?: string;
+  route?: string;
+  email?: string;
   role: 'admin' | 'member';
-  capital_share: number;
+  capital_share?: number;
+  refund?: number;
+  capital_build_up?: number;
+  total_capital_share: number;
   loan_balance: number;
+  dividend?: number;
+  gender?: string;
   created_at: string;
 };
 
@@ -439,6 +449,7 @@ export default function DigitalVaultApp() {
             email: currentUser.email || '',
             role: (currentUser.email === 'century.decadee@gmail.com' || currentUser.email === 'ronald.narvasa.rn@gmail.com') ? 'admin' : 'member',
             capital_share: 0,
+            total_capital_share: 0,
             loan_balance: 0,
             created_at: new Date().toISOString()
           };
@@ -627,7 +638,7 @@ export default function DigitalVaultApp() {
         </nav>
 
         {(memberProfile?.role === 'admin' || auth.currentUser?.email === 'century.decadee@gmail.com' || auth.currentUser?.email === 'ronald.narvasa.rn@gmail.com') && (
-          <SidebarAutomation masterNodes={masterNodes} members={members} isAdmin={true} />
+          <SidebarAutomation masterNodes={masterNodes} members={members} isAdmin={true} showToast={showToast} />
         )}
 
         <div className="p-4 border-t border-zinc-800">
@@ -940,7 +951,7 @@ function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterN
       <div className={clsx("p-6 rounded-2xl border", bgColor, borderColor)}>
         <p className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-2">{title} Master Node Balance</p>
         <p className={clsx("text-4xl font-mono font-bold tracking-tight", color)}>
-          ${balance.toLocaleString()}
+          ${(balance || 0).toLocaleString()}
         </p>
       </div>
 
@@ -969,7 +980,7 @@ function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterN
                   </div>
                   <div className="text-right">
                     <p className={clsx("font-mono font-medium", tx.type === 'INFLOW' ? "text-emerald-400" : "text-rose-400")}>
-                      {tx.type === 'INFLOW' ? '+' : '-'}${tx.amount.toLocaleString()}
+                      {tx.type === 'INFLOW' ? '+' : '-'}${(tx.amount || 0).toLocaleString()}
                     </p>
                     <p className="text-xs text-zinc-500 uppercase tracking-wider">{tx.source_fund}</p>
                   </div>
@@ -1007,14 +1018,14 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
 
   // Member Capital Distribution
   const pieData = members
-    .sort((a, b) => b.capital_share - a.capital_share)
+    .sort((a, b) => (b.total_capital_share || 0) - (a.total_capital_share || 0))
     .slice(0, 5)
-    .map(m => ({ name: m.name, value: m.capital_share }));
+    .map(m => ({ name: m.name, value: m.total_capital_share || 0 }));
   
   const otherCapital = members
-    .sort((a, b) => b.capital_share - a.capital_share)
+    .sort((a, b) => (b.total_capital_share || 0) - (a.total_capital_share || 0))
     .slice(5)
-    .reduce((sum, m) => sum + m.capital_share, 0);
+    .reduce((sum, m) => sum + (m.total_capital_share || 0), 0);
   
   if (otherCapital > 0) {
     pieData.push({ name: 'Others', value: otherCapital });
@@ -1343,9 +1354,8 @@ function AdminTab({ nodeRegistry, masterNodes, showToast }: { nodeRegistry: Node
                   <p className="text-sm text-zinc-400">Maps transactions to the {node.parent_master_node} master node.</p>
                   <button 
                     onClick={async () => {
-                      if (confirm(`Delete category "${node.name}"?`)) {
-                        await deleteDoc(doc(db, 'node_registry', node.id));
-                      }
+                      await deleteDoc(doc(db, 'node_registry', node.id));
+                      showToast(`Deleted category "${node.name}"`);
                     }}
                     className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-rose-500 transition-all"
                   >
@@ -1526,7 +1536,7 @@ function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, 
                     </td>
                     <td className="px-6 py-4 text-right">
                       <p className={clsx("text-sm font-mono font-bold", tx.type === 'INFLOW' ? "text-emerald-400" : "text-rose-400")}>
-                        {tx.type === 'INFLOW' ? '+' : '-'}${tx.amount.toLocaleString()}
+                        {tx.type === 'INFLOW' ? '+' : '-'}${(tx.amount || 0).toLocaleString()}
                       </p>
                     </td>
                   </tr>
@@ -1590,7 +1600,7 @@ function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, 
                   
                   <div className="flex items-center justify-between sm:justify-end gap-6 w-full sm:w-auto">
                     <p className="font-mono text-lg font-medium">
-                      {tx.type === 'INFLOW' ? '+' : '-'}${tx.amount.toLocaleString()}
+                      {tx.type === 'INFLOW' ? '+' : '-'}${(tx.amount || 0).toLocaleString()}
                     </p>
                     {isAdmin && (
                       <div className="flex gap-2">
@@ -1621,18 +1631,58 @@ function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, 
   );
 }
 
-function SidebarAutomation({ masterNodes, members, isAdmin }: { masterNodes: Record<string, MasterNode>, members: Member[], isAdmin: boolean }) {
+function SidebarAutomation({ masterNodes, members, isAdmin, showToast }: { masterNodes: Record<string, MasterNode>, members: Member[], isAdmin: boolean, showToast: (msg: string, type?: 'success' | 'error') => void }) {
   const isActuallyAdmin = isAdmin || auth.currentUser?.email === 'century.decadee@gmail.com' || auth.currentUser?.email === 'ronald.narvasa.rn@gmail.com';
+  const [isImporting, setIsImporting] = useState(false);
+  const [confirmImport, setConfirmImport] = useState(false);
 
   if (!isActuallyAdmin) return null;
+
+  const handleImportInitialData = async () => {
+    if (!confirmImport) {
+      setConfirmImport(true);
+      setTimeout(() => setConfirmImport(false), 3000);
+      return;
+    }
+    
+    setIsImporting(true);
+    setConfirmImport(false);
+    try {
+      const { INITIAL_MEMBERS } = await import('@/lib/initial_members');
+      
+      for (const memberData of INITIAL_MEMBERS) {
+        const uid = `user_${Math.random().toString(36).substr(2, 9)}`;
+        await setDoc(doc(db, 'members', uid), {
+          ...memberData,
+          uid,
+          loan_balance: 0,
+          total_capital_share: memberData.total_capital_share || 0,
+          created_at: new Date().toISOString()
+        });
+      }
+      
+      showToast(`Successfully imported ${INITIAL_MEMBERS.length} members.`);
+    } catch (error: any) {
+      showToast("Import failed: " + error.message, 'error');
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   return (
     <div className="p-4 border-t border-zinc-800">
       <div className="flex items-center justify-between mb-3">
         <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Admin Engines</p>
       </div>
-      <div className="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800">
-        <p className="text-xs text-zinc-500 italic">No active automation engines.</p>
+      <div className="space-y-2">
+        <button 
+          onClick={handleImportInitialData}
+          disabled={isImporting}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-bold text-zinc-400 hover:text-white hover:border-zinc-700 transition-all disabled:opacity-50"
+        >
+          {isImporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+          {isImporting ? 'Importing...' : confirmImport ? 'Click Again to Confirm' : 'Import Masterlist Data'}
+        </button>
       </div>
     </div>
   );
@@ -1642,7 +1692,7 @@ function MasterNodeCard({ title, amount, color }: { title: string, amount: numbe
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden group hover:border-zinc-700 transition-colors">
       <p className="text-sm text-zinc-400 font-medium uppercase tracking-wider mb-1">{title}</p>
-      <p className={clsx("text-2xl font-mono font-bold", color)}>${amount.toLocaleString()}</p>
+      <p className={clsx("text-2xl font-mono font-bold", color)}>${(amount || 0).toLocaleString()}</p>
     </div>
   );
 }
@@ -1685,6 +1735,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
         email: newMemberEmail || '',
         role: newMemberRole,
         capital_share: 0,
+        total_capital_share: 0,
         loan_balance: 0,
         created_at: new Date().toISOString()
       });
@@ -1809,12 +1860,12 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
-                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-0.5">Capital</p>
-                      <p className="text-sm font-mono text-emerald-400">${member.capital_share.toLocaleString()}</p>
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-0.5">Total Capital</p>
+                      <p className="text-sm font-mono text-emerald-400">${(member.total_capital_share || 0).toLocaleString()}</p>
                     </div>
                     <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
                       <p className="text-[10px] text-zinc-500 uppercase font-bold mb-0.5">Debt</p>
-                      <p className="text-sm font-mono text-rose-400">${member.loan_balance.toLocaleString()}</p>
+                      <p className="text-sm font-mono text-rose-400">${(member.loan_balance || 0).toLocaleString()}</p>
                     </div>
                   </div>
                 </button>
@@ -1827,7 +1878,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                   <tr className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold border-b border-zinc-800">
                     <th className="px-4 py-3">Member</th>
                     <th className="px-4 py-3">Role</th>
-                    <th className="px-4 py-3 text-right">Capital Share</th>
+                    <th className="px-4 py-3 text-right">Total Capital</th>
                     <th className="px-4 py-3 text-right">Loan Balance</th>
                     <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
@@ -1859,10 +1910,10 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                         </span>
                       </td>
                       <td className="px-4 py-4 text-right font-mono text-emerald-400">
-                        ${member.capital_share.toLocaleString()}
+                        ${(member.total_capital_share || 0).toLocaleString()}
                       </td>
                       <td className="px-4 py-4 text-right font-mono text-rose-400">
-                        ${member.loan_balance.toLocaleString()}
+                        ${(member.loan_balance || 0).toLocaleString()}
                       </td>
                       <td className="px-4 py-4 text-right">
                         <button className="text-zinc-500 hover:text-white transition-colors">
@@ -1920,7 +1971,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
               </div>
 
               <div className="flex-1 overflow-y-auto p-8">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
                   {/* Debt to Equity Gauge */}
                   <div className="lg:col-span-1 bg-zinc-950 p-6 rounded-2xl border border-zinc-800 flex flex-col items-center justify-center">
                     <div className="relative w-40 h-20 overflow-hidden mb-4">
@@ -1928,24 +1979,85 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                       <div 
                         className="absolute top-0 left-0 w-40 h-40 rounded-full border-[12px] border-rose-500 border-b-transparent border-r-transparent transition-transform duration-1000 ease-out"
                         style={{ 
-                          transform: `rotate(${Math.min(135, -45 + ((selectedMember.loan_balance / (selectedMember.capital_share || 1)) * 180))}deg)` 
+                          transform: `rotate(${Math.min(135, -45 + ((selectedMember.loan_balance / (selectedMember.total_capital_share || 1)) * 180))}deg)` 
                         }}
                       ></div>
                       <div className="absolute bottom-0 left-0 w-full text-center">
                         <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">D/E Ratio</p>
                         <p className="text-lg font-mono font-bold text-white">
-                          {((selectedMember.loan_balance / (selectedMember.capital_share || 1)) * 100).toFixed(1)}%
+                          {(((selectedMember.loan_balance || 0) / (selectedMember.total_capital_share || 1)) * 100).toFixed(1)}%
                         </p>
                       </div>
                     </div>
                     <div className="w-full grid grid-cols-2 gap-4">
                       <div className="text-center">
-                        <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">Capital</p>
-                        <p className="font-mono text-emerald-400 text-lg">${selectedMember.capital_share.toLocaleString()}</p>
+                        <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">Total Capital</p>
+                        <p className="font-mono text-emerald-400 text-lg">${(selectedMember.total_capital_share || 0).toLocaleString()}</p>
                       </div>
                       <div className="text-center">
                         <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">Debt</p>
-                        <p className="font-mono text-rose-400 text-lg">${selectedMember.loan_balance.toLocaleString()}</p>
+                        <p className="font-mono text-rose-400 text-lg">${(selectedMember.loan_balance || 0).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Member Info Cards */}
+                  <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-zinc-950 p-4 rounded-2xl border border-zinc-800">
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-2">Vehicle Details</p>
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-xs text-zinc-400">Plate No.</p>
+                          <p className="text-sm font-medium text-white">{selectedMember.plate_no || 'N/A'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-400">Route</p>
+                          <p className="text-sm font-medium text-white">{selectedMember.route || 'N/A'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-400">Registered Name</p>
+                          <p className="text-sm font-medium text-white italic">{selectedMember.registered_name || 'N/A'}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-950 p-4 rounded-2xl border border-zinc-800">
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-2">Capital Breakdown</p>
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <p className="text-xs text-zinc-400">Base Share</p>
+                          <p className="text-sm font-mono text-white">${(selectedMember.capital_share || 0).toLocaleString()}</p>
+                        </div>
+                        <div className="flex justify-between">
+                          <p className="text-xs text-zinc-400">Refund</p>
+                          <p className="text-sm font-mono text-rose-400">-${(selectedMember.refund || 0).toLocaleString()}</p>
+                        </div>
+                        <div className="flex justify-between">
+                          <p className="text-xs text-zinc-400">Build Up</p>
+                          <p className="text-sm font-mono text-emerald-400">+${(selectedMember.capital_build_up || 0).toLocaleString()}</p>
+                        </div>
+                        <div className="pt-2 border-t border-zinc-800 flex justify-between">
+                          <p className="text-xs font-bold text-zinc-300">Total</p>
+                          <p className="text-sm font-mono font-bold text-emerald-400">${(selectedMember.total_capital_share || 0).toLocaleString()}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-950 p-4 rounded-2xl border border-zinc-800">
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-2">Earnings & Profile</p>
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-xs text-zinc-400">Dividend</p>
+                          <p className="text-sm font-mono text-indigo-400">${(selectedMember.dividend || 0).toLocaleString()}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-400">Gender</p>
+                          <p className="text-sm font-medium text-white">{selectedMember.gender || 'N/A'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-400">Joined</p>
+                          <p className="text-sm text-white">{format(new Date(selectedMember.created_at), 'MMM d, yyyy')}</p>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1975,7 +2087,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                             "font-mono font-medium",
                             tx.type === 'INFLOW' ? "text-emerald-400" : "text-rose-400"
                           )}>
-                            {tx.type === 'INFLOW' ? '+' : '-'}${tx.amount.toLocaleString()}
+                            {tx.type === 'INFLOW' ? '+' : '-'}${(tx.amount || 0).toLocaleString()}
                           </p>
                           <p className={clsx(
                             "text-[10px] uppercase tracking-wider font-bold mt-1 px-2 py-0.5 rounded-full inline-block",
@@ -2323,7 +2435,7 @@ function TransactionTab({ transactions, members, showToast }: { transactions: Tr
                       "font-mono font-medium",
                       tx.type === 'INFLOW' ? "text-emerald-400" : "text-rose-400"
                     )}>
-                      {tx.type === 'INFLOW' ? '+' : '-'}${tx.amount.toLocaleString()}
+                      {tx.type === 'INFLOW' ? '+' : '-'}${(tx.amount || 0).toLocaleString()}
                     </p>
                     <p className={clsx(
                       "text-[10px] uppercase tracking-wider font-semibold mt-1",
