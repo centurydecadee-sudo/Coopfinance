@@ -26,12 +26,13 @@ export function TransactionEngine({
   const [source, setSource] = useState<'BANK' | 'HAND' | ''>('');
   const [nodeCat, setNodeCat] = useState('');
   const [amount, setAmount] = useState('');
+  const [transactionDate, setTransactionDate] = useState(new Date().toISOString().split('T')[0]);
   const [memberId, setMemberId] = useState(preselectedMemberId || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!source || !nodeCat || !amount || !memberId) return;
+    if (!source || !nodeCat || !amount || !memberId || !transactionDate) return;
 
     setIsSubmitting(true);
     try {
@@ -49,7 +50,9 @@ export function TransactionEngine({
         member_id: memberId,
         status: 'PENDING',
         created_by: currentUser?.uid || '',
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        transaction_date: transactionDate,
+        description: ''
       };
 
       await setDoc(doc(db, 'transactions', txId), newTx);
@@ -180,6 +183,17 @@ export function TransactionEngine({
                     placeholder="0.00"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-zinc-300 mb-2">Transaction Date <span className="text-rose-500">*</span></label>
+                <input 
+                  type="date" 
+                  required
+                  value={transactionDate}
+                  onChange={(e) => setTransactionDate(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                />
               </div>
             </div>
 

@@ -90,7 +90,7 @@ export const INITIAL_MEMBERS = [
     capital_share: 20000,
     refund: 20000,
     capital_build_up: 400,
-    total_capital_share: 20400,
+    total_capital_share: 400,
     dividend: 10015.05,
     gender: "M",
     role: "member"

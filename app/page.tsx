@@ -5,13 +5,15 @@ import { auth, db } from '@/lib/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import LoginPage from '@/components/LoginPage';
 import { GoogleGenAI } from "@google/genai";
-import { doc, getDoc, setDoc, collection, onSnapshot, query, orderBy, runTransaction, serverTimestamp, deleteDoc, updateDoc, addDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, onSnapshot, query, orderBy, runTransaction, serverTimestamp, deleteDoc, updateDoc, addDoc, writeBatch, where, getDocs } from 'firebase/firestore';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   LayoutDashboard, 
   Users, 
   ArrowRightLeft, 
   ArrowRight,
+  ArrowLeft,
+  Menu,
   LogOut, 
   Wallet, 
   Banknote, 
@@ -36,7 +38,12 @@ import {
   Sparkles,
   ShoppingBag,
   Loader2,
-  Trash2
+  Trash2,
+  UserPlus,
+  RotateCcw,
+  RefreshCw,
+  Download,
+  FileSpreadsheet
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { 
@@ -226,20 +233,13 @@ type Transaction = {
   verified_by?: string;
   created_at: string;
   verified_at?: string;
+  transaction_date: string;
+  description?: string;
 };
 
 // --- Shared Functions ---
 const createAndVerifyTransaction = async (newTx: Transaction, currentUserId: string) => {
   await runTransaction(db, async (transaction) => {
-    const txRef = doc(db, 'transactions', newTx.id);
-    const verifiedTx = { 
-      ...newTx, 
-      status: 'VERIFIED' as const, 
-      verified_by: currentUserId, 
-      verified_at: new Date().toISOString() 
-    };
-    transaction.set(txRef, verifiedTx);
-
     const sourceRef = doc(db, 'source_funds', newTx.source_fund);
     const masterRef = doc(db, 'master_nodes', newTx.parent_master_node);
     const memberRef = doc(db, 'members', newTx.member_id);
@@ -249,6 +249,10 @@ const createAndVerifyTransaction = async (newTx: Transaction, currentUserId: str
       transaction.get(masterRef),
       transaction.get(memberRef)
     ]);
+
+    if (!sourceDoc.exists()) throw new Error(`Source fund ${newTx.source_fund} not found.`);
+    if (!masterDoc.exists()) throw new Error(`Master node ${newTx.parent_master_node} not found.`);
+    if (!memberDoc.exists()) throw new Error(`Member ${newTx.member_id} not found.`);
 
     let newSourceBal = sourceDoc.data()?.balance || 0;
     let newMasterBal = masterDoc.data()?.balance || 0;
@@ -279,9 +283,22 @@ const createAndVerifyTransaction = async (newTx: Transaction, currentUserId: str
       }
     }
 
+    const txRef = doc(db, 'transactions', newTx.id);
+    const verifiedTx = { 
+      ...newTx, 
+      status: 'VERIFIED' as const, 
+      verified_by: currentUserId, 
+      verified_at: new Date().toISOString() 
+    };
+    transaction.set(txRef, verifiedTx);
+
     transaction.update(sourceRef, { balance: newSourceBal, updated_at: new Date().toISOString() });
     transaction.update(masterRef, { balance: newMasterBal, updated_at: new Date().toISOString() });
-    transaction.update(memberRef, { loan_balance: newLoanBal, capital_share: newCapitalBal });
+    transaction.update(memberRef, { 
+      loan_balance: newLoanBal, 
+      capital_share: newCapitalBal,
+      total_capital_share: newCapitalBal // Syncing for reports
+    });
   });
 };
 
@@ -314,6 +331,10 @@ const verifyTransaction = async (tx: Transaction, isApproved: boolean, currentUs
       transaction.get(masterRef),
       transaction.get(memberRef)
     ]);
+
+    if (!sourceDoc.exists()) throw new Error(`Source fund ${tx.source_fund} not found.`);
+    if (!masterDoc.exists()) throw new Error(`Master node ${tx.parent_master_node} not found.`);
+    if (!memberDoc.exists()) throw new Error(`Member ${tx.member_id} not found.`);
 
     let newSourceBal = sourceDoc.data()?.balance || 0;
     let newMasterBal = masterDoc.data()?.balance || 0;
@@ -374,8 +395,29 @@ const verifyTransaction = async (tx: Transaction, isApproved: boolean, currentUs
 export default function DigitalVaultApp() {
   const [user, setUser] = useState<any>(null);
   const [memberProfile, setMemberProfile] = useState<Member | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'members' | 'transaction' | 'income' | 'expenses' | 'lending' | 'reports' | 'admin' | 'merchandise'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'members' | 'transaction' | 'income' | 'expenses' | 'lending' | 'reports' | 'export' | 'admin' | 'merchandise'>('dashboard');
+  const [navigationStack, setNavigationStack] = useState<string[]>(['dashboard']);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // For mobile sidebar toggle
+
+  const navigateTo = (tab: typeof activeTab) => {
+    setActiveTab(tab);
+    setNavigationStack(prev => {
+      if (prev[prev.length - 1] === tab) return prev;
+      return [...prev, tab];
+    });
+    setIsSidebarOpen(false);
+  };
+
+  const handleBack = () => {
+    if (navigationStack.length > 1) {
+      const newStack = [...navigationStack];
+      newStack.pop();
+      const prevTab = newStack[newStack.length - 1];
+      setNavigationStack(newStack);
+      setActiveTab(prevTab as any);
+    }
+  };
 
   // Data state
   const [sourceFunds, setSourceFunds] = useState<Record<string, SourceFund>>({});
@@ -413,7 +455,9 @@ export default function DigitalVaultApp() {
         sold_price: price
       });
       // 2. Add profit to income
-      await addDoc(collection(db, 'transactions'), {
+      const txRef = doc(collection(db, 'transactions'));
+      await setDoc(txRef, {
+        id: txRef.id,
         type: 'INFLOW',
         source_fund: 'BANK',
         node_category: 'sales_profit',
@@ -421,7 +465,7 @@ export default function DigitalVaultApp() {
         amount: price - itemToSell.buy_price,
         member_id: 'SYSTEM',
         status: 'VERIFIED',
-        created_by: auth.currentUser?.uid,
+        created_by: auth.currentUser?.uid || 'system',
         created_at: new Date().toISOString()
       });
       showToast("Item marked as sold and profit recorded.");
@@ -560,17 +604,25 @@ export default function DigitalVaultApp() {
     <ErrorBoundary>
       <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col md:flex-row font-sans selection:bg-emerald-500/30">
       {/* Sidebar */}
-      <aside className="w-full md:w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col">
-        <div className="p-6 border-b border-zinc-800 flex items-center gap-3">
-          <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center text-black">
-            <Wallet className="w-5 h-5" />
+      <aside className={clsx(
+        "fixed inset-y-0 left-0 z-50 w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0",
+        isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="p-6 border-b border-zinc-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center text-black">
+              <Wallet className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="font-bold text-lg leading-none tracking-tight">Coop Finance</h2>
+              <p className="text-xs text-zinc-500 mt-1">
+                {(memberProfile?.role === 'admin' || auth.currentUser?.email === 'century.decadee@gmail.com' || auth.currentUser?.email === 'ronald.narvasa.rn@gmail.com') ? 'Admin Mode' : 'Member Mode'}
+              </p>
+            </div>
           </div>
-          <div>
-            <h2 className="font-bold text-lg leading-none tracking-tight">Coop Finance</h2>
-            <p className="text-xs text-zinc-500 mt-1">
-              {(memberProfile?.role === 'admin' || auth.currentUser?.email === 'century.decadee@gmail.com' || auth.currentUser?.email === 'ronald.narvasa.rn@gmail.com') ? 'Admin Mode' : 'Member Mode'}
-            </p>
-          </div>
+          <button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg">
+            <XCircle className="w-5 h-5" />
+          </button>
         </div>
         
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -578,51 +630,57 @@ export default function DigitalVaultApp() {
             icon={<LayoutDashboard className="w-5 h-5" />} 
             label="Dashboard" 
             active={activeTab === 'dashboard'} 
-            onClick={() => setActiveTab('dashboard')} 
+            onClick={() => navigateTo('dashboard')} 
           />
           <NavItem 
             icon={<PieChart className="w-5 h-5" />} 
             label="Reports" 
             active={activeTab === 'reports'} 
-            onClick={() => setActiveTab('reports')} 
+            onClick={() => navigateTo('reports')} 
+          />
+          <NavItem 
+            icon={<Download className="w-5 h-5" />} 
+            label="Export" 
+            active={activeTab === 'export'} 
+            onClick={() => navigateTo('export')} 
           />
           <div className="pt-4 pb-2 px-3 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Master Nodes</div>
           <NavItem 
             icon={<TrendingUp className="w-5 h-5" />} 
             label="Income" 
             active={activeTab === 'income'} 
-            onClick={() => setActiveTab('income')} 
+            onClick={() => navigateTo('income')} 
           />
           <NavItem 
             icon={<TrendingDown className="w-5 h-5" />} 
             label="Expenses" 
             active={activeTab === 'expenses'} 
-            onClick={() => setActiveTab('expenses')} 
+            onClick={() => navigateTo('expenses')} 
           />
           <NavItem 
             icon={<Landmark className="w-5 h-5" />} 
             label="Lending" 
             active={activeTab === 'lending'} 
-            onClick={() => setActiveTab('lending')} 
+            onClick={() => navigateTo('lending')} 
           />
           <div className="pt-4 pb-2 px-3 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Operations</div>
           <NavItem 
             icon={<ArrowRightLeft className="w-5 h-5" />} 
             label="Transaction" 
             active={activeTab === 'transaction'} 
-            onClick={() => setActiveTab('transaction')} 
+            onClick={() => navigateTo('transaction')} 
           />
           <NavItem 
             icon={<ShoppingBag className="w-5 h-5" />} 
             label="Merchandise" 
             active={activeTab === 'merchandise'} 
-            onClick={() => setActiveTab('merchandise')} 
+            onClick={() => navigateTo('merchandise')} 
           />
           <NavItem 
             icon={<Users className="w-5 h-5" />} 
             label="Member Directory" 
             active={activeTab === 'members'} 
-            onClick={() => setActiveTab('members')} 
+            onClick={() => navigateTo('members')} 
           />
           {(memberProfile?.role === 'admin' || auth.currentUser?.email === 'century.decadee@gmail.com' || auth.currentUser?.email === 'ronald.narvasa.rn@gmail.com') && (
             <>
@@ -631,7 +689,7 @@ export default function DigitalVaultApp() {
                 icon={<ShieldAlert className="w-5 h-5" />} 
                 label="Admin" 
                 active={activeTab === 'admin'} 
-                onClick={() => setActiveTab('admin')} 
+                onClick={() => navigateTo('admin')} 
               />
             </>
           )}
@@ -660,6 +718,9 @@ export default function DigitalVaultApp() {
           </button>
         </div>
       </aside>
+      {isSidebarOpen && (
+        <div className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setIsSidebarOpen(false)} />
+      )}
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -677,6 +738,18 @@ export default function DigitalVaultApp() {
               {activeTab === 'admin' && 'Admin Control Panel'}
             </h1>
             <div className="flex items-center gap-4">
+              <button onClick={() => setIsSidebarOpen(true)} className="md:hidden p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg">
+                <Menu className="w-5 h-5" />
+              </button>
+              {navigationStack.length > 1 && (
+                <button 
+                  onClick={handleBack} 
+                  className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors"
+                  title="Go Back"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+              )}
               <div className="flex items-center gap-6">
                 <div className="flex items-center gap-2">
                   <Banknote className="w-5 h-5 text-emerald-500" />
@@ -719,6 +792,7 @@ export default function DigitalVaultApp() {
                   members={members}
                   showToast={showToast}
                   setActiveTab={setActiveTab}
+                  sourceFunds={sourceFunds}
                 />
               )}
               {activeTab === 'income' && (
@@ -732,6 +806,9 @@ export default function DigitalVaultApp() {
                   color="text-emerald-400"
                   bgColor="bg-emerald-500/10"
                   borderColor="border-emerald-500/20"
+                  sourceFunds={sourceFunds}
+                  nodeRegistry={nodeRegistry}
+                  showToast={showToast}
                 />
               )}
               {activeTab === 'expenses' && (
@@ -745,6 +822,9 @@ export default function DigitalVaultApp() {
                   color="text-rose-400"
                   bgColor="bg-rose-500/10"
                   borderColor="border-rose-500/20"
+                  sourceFunds={sourceFunds}
+                  nodeRegistry={nodeRegistry}
+                  showToast={showToast}
                 />
               )}
               {activeTab === 'lending' && (
@@ -758,6 +838,9 @@ export default function DigitalVaultApp() {
                   color="text-blue-400"
                   bgColor="bg-blue-500/10"
                   borderColor="border-blue-500/20"
+                  sourceFunds={sourceFunds}
+                  nodeRegistry={nodeRegistry}
+                  showToast={showToast}
                 />
               )}
               {activeTab === 'members' && (
@@ -791,12 +874,23 @@ export default function DigitalVaultApp() {
                   key="admin"
                   nodeRegistry={nodeRegistry}
                   masterNodes={masterNodes}
+                  members={members}
+                  transactions={transactions}
                   showToast={showToast}
                 />
               )}
               {activeTab === 'reports' && (
                 <ReportsTab 
                   key="reports"
+                  transactions={transactions}
+                  masterNodes={masterNodes}
+                  members={members}
+                  sourceFunds={sourceFunds}
+                />
+              )}
+              {activeTab === 'export' && (
+                <ExportTab 
+                  key="export"
                   transactions={transactions}
                   masterNodes={masterNodes}
                   members={members}
@@ -938,8 +1032,96 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode, labe
   );
 }
 
-function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterNodes, color, bgColor, borderColor }: { title: string, masterNodeId: string, transactions: Transaction[], members: Member[], masterNodes: Record<string, MasterNode>, color: string, bgColor: string, borderColor: string }) {
-  const filteredTxs = transactions.filter(t => t.parent_master_node === masterNodeId && t.status === 'VERIFIED');
+function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterNodes, color, bgColor, borderColor, sourceFunds, nodeRegistry, showToast }: { title: string, masterNodeId: string, transactions: Transaction[], members: Member[], masterNodes: Record<string, MasterNode>, color: string, bgColor: string, borderColor: string, sourceFunds: Record<string, SourceFund>, nodeRegistry: NodeRegistry[], showToast: (msg: string, type?: 'success' | 'error') => void }) {
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [manualAmount, setManualAmount] = useState('');
+  const [manualDate, setManualDate] = useState(new Date().toISOString().split('T')[0]);
+  const [manualDesc, setManualDesc] = useState('');
+  const [manualSourceFund, setManualSourceFund] = useState<'BANK' | 'HAND'>('BANK');
+  const [manualCategory, setManualCategory] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [filterStartDate, setFilterStartDate] = useState('');
+  const [filterEndDate, setFilterEndDate] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+
+  const nodeCategories = nodeRegistry.filter(n => n.parent_master_node === masterNodeId);
+
+  const handleManualEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setIsSubmitting(true);
+      const amount = parseFloat(manualAmount);
+      if (isNaN(amount) || amount <= 0) throw new Error("Invalid amount");
+      if (!manualCategory) throw new Error("Please select a category");
+      if (!manualDate) throw new Error("Please select a date");
+      
+      const txDate = new Date(manualDate);
+      if (txDate.getFullYear() < 2026) {
+        throw new Error("Transactions must be dated 2026 or later.");
+      }
+
+      const batch = writeBatch(db);
+      
+      // Update Source Fund
+      const fundRef = doc(db, 'source_funds', manualSourceFund);
+      const fundDoc = await getDoc(fundRef);
+      const currentFundBal = fundDoc.data()?.balance || 0;
+      const fundChange = masterNodeId === 'INCOME' ? amount : -amount;
+      batch.update(fundRef, { balance: currentFundBal + fundChange, updated_at: new Date().toISOString() });
+      
+      // Update Master Node
+      const masterRef = doc(db, 'master_nodes', masterNodeId);
+      const masterDoc = await getDoc(masterRef);
+      const currentMasterBal = masterDoc.data()?.balance || 0;
+      batch.update(masterRef, { balance: currentMasterBal + amount, updated_at: new Date().toISOString() });
+      
+      // Create Transaction
+      const txRef = doc(collection(db, 'transactions'));
+      batch.set(txRef, {
+        id: txRef.id,
+        type: masterNodeId === 'INCOME' ? 'INFLOW' : 'OUTFLOW',
+        source_fund: manualSourceFund,
+        node_category: manualCategory,
+        parent_master_node: masterNodeId,
+        amount: amount,
+        member_id: 'SYSTEM',
+        status: 'VERIFIED',
+        created_by: auth.currentUser?.uid || 'system',
+        created_at: new Date().toISOString(),
+        verified_at: new Date().toISOString(),
+        verified_by: auth.currentUser?.uid || 'system',
+        transaction_date: manualDate,
+        description: manualDesc
+      });
+      
+      await batch.commit();
+      showToast(`Successfully recorded $${amount.toLocaleString()} to ${manualCategory}.`);
+      setShowManualEntry(false);
+      setManualAmount('');
+      setManualDesc('');
+    } catch (e: any) {
+      showToast("Error: " + e.message, 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  let filteredTxs = transactions.filter(t => t.parent_master_node === masterNodeId && t.status === 'VERIFIED');
+  
+  if (filterStartDate) {
+    filteredTxs = filteredTxs.filter(t => (t.transaction_date || t.created_at.split('T')[0]) >= filterStartDate);
+  }
+  if (filterEndDate) {
+    filteredTxs = filteredTxs.filter(t => (t.transaction_date || t.created_at.split('T')[0]) <= filterEndDate);
+  }
+  if (filterCategory) {
+    filteredTxs = filteredTxs.filter(t => t.node_category === filterCategory);
+  }
+
+  // Sort by transaction_date desc
+  filteredTxs.sort((a, b) => new Date(b.transaction_date || b.created_at).getTime() - new Date(a.transaction_date || a.created_at).getTime());
+
   const balance = masterNodes[masterNodeId]?.balance || 0;
 
   return (
@@ -948,23 +1130,72 @@ function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterN
       animate={{ opacity: 1, y: 0 }} 
       className="space-y-6"
     >
-      <div className={clsx("p-6 rounded-2xl border", bgColor, borderColor)}>
-        <p className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-2">{title} Master Node Balance</p>
-        <p className={clsx("text-4xl font-mono font-bold tracking-tight", color)}>
-          ${(balance || 0).toLocaleString()}
-        </p>
+      <div className={clsx("p-6 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4", bgColor, borderColor)}>
+        <div>
+          <p className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-2">{title} Master Node Balance</p>
+          <p className={clsx("text-4xl font-mono font-bold tracking-tight", color)}>
+            ${(balance || 0).toLocaleString()}
+          </p>
+        </div>
+        {(masterNodeId === 'INCOME' || masterNodeId === 'EXPENSES') && (
+          <button 
+            onClick={() => setShowManualEntry(true)}
+            className={clsx(
+              "px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap bg-zinc-900 border",
+              color, borderColor, "hover:bg-zinc-800"
+            )}
+          >
+            <Plus className="w-5 h-5" />
+            Manual Entry
+          </button>
+        )}
       </div>
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="p-5 border-b border-zinc-800">
+        <div className="p-5 border-b border-zinc-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h3 className="font-semibold text-lg flex items-center gap-2">
             <Activity className="w-5 h-5 text-zinc-400" />
             Verified Ledger
           </h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <input 
+              type="date" 
+              value={filterStartDate}
+              onChange={(e) => setFilterStartDate(e.target.value)}
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+              placeholder="Start Date"
+            />
+            <span className="text-zinc-500">to</span>
+            <input 
+              type="date" 
+              value={filterEndDate}
+              onChange={(e) => setFilterEndDate(e.target.value)}
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+              placeholder="End Date"
+            />
+            <select
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+            >
+              <option value="">All Categories</option>
+              {Array.from(new Set(transactions.filter(t => t.parent_master_node === masterNodeId).map(t => t.node_category))).map(cat => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+            {(filterStartDate || filterEndDate || filterCategory) && (
+              <button 
+                onClick={() => { setFilterStartDate(''); setFilterEndDate(''); setFilterCategory(''); }}
+                className="text-xs text-rose-400 hover:text-rose-300 px-2"
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
         {filteredTxs.length === 0 ? (
           <div className="p-8 text-center text-zinc-500">
-            <p>No verified transactions found for this node.</p>
+            <p>No verified transactions found for this node with the current filters.</p>
           </div>
         ) : (
           <div className="divide-y divide-zinc-800">
@@ -973,9 +1204,12 @@ function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterN
               return (
                 <div key={tx.id} className="p-4 flex items-center justify-between hover:bg-zinc-800/30 transition-colors">
                   <div>
-                    <p className="font-medium text-white">{tx.node_category}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-white">{tx.node_category}</p>
+                      {tx.description && <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">{tx.description}</span>}
+                    </div>
                     <p className="text-sm text-zinc-400">
-                      {member?.name || 'Unknown'} • {format(new Date(tx.created_at), 'MMM d, yyyy h:mm a')}
+                      {member?.name || 'System'} • {format(new Date(tx.transaction_date || tx.created_at), 'MMM d, yyyy')}
                     </p>
                   </div>
                   <div className="text-right">
@@ -990,6 +1224,98 @@ function FilteredLedgerTab({ title, masterNodeId, transactions, members, masterN
           </div>
         )}
       </div>
+
+      <AnimatePresence>
+        {showManualEntry && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-md shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-semibold text-white">Manual {title} Entry</h3>
+                <button 
+                  onClick={() => setShowManualEntry(false)}
+                  className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-full transition-colors"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <form onSubmit={handleManualEntry} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Amount</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500">$</span>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      value={manualAmount}
+                      onChange={(e) => setManualAmount(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-3 pl-8 pr-4 text-white focus:outline-none focus:border-indigo-500"
+                      required
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Date</label>
+                  <input 
+                    type="date" 
+                    value={manualDate}
+                    onChange={(e) => setManualDate(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Category</label>
+                  <select 
+                    value={manualCategory}
+                    onChange={(e) => setManualCategory(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+                    required
+                  >
+                    <option value="">Select Category</option>
+                    {nodeCategories.map(n => (
+                      <option key={n.id} value={n.name}>{n.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Source Fund</label>
+                  <select 
+                    value={manualSourceFund}
+                    onChange={(e) => setManualSourceFund(e.target.value as 'BANK' | 'HAND')}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="BANK">Bank (${(sourceFunds['BANK']?.balance || 0).toLocaleString()})</option>
+                    <option value="HAND">Cash on Hand (${(sourceFunds['HAND']?.balance || 0).toLocaleString()})</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-2">Description (Optional)</label>
+                  <input 
+                    type="text" 
+                    value={manualDesc}
+                    onChange={(e) => setManualDesc(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+                    placeholder="Brief details..."
+                  />
+                </div>
+                <button 
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-3 rounded-xl transition-colors disabled:opacity-50 mt-4"
+                >
+                  {isSubmitting ? 'Recording...' : 'Record Entry'}
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -1006,7 +1332,7 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
     const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0);
 
     const monthTxs = verifiedTxs.filter(t => {
-      const txDate = new Date(t.created_at);
+      const txDate = new Date(t.transaction_date || t.created_at);
       return txDate >= monthStart && txDate <= monthEnd;
     });
 
@@ -1032,6 +1358,17 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
   }
 
   const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#71717a'];
+
+  const timelineTxs = verifiedTxs
+    .filter(t => {
+      const dateStr = t.transaction_date || t.created_at.split('T')[0];
+      return dateStr >= '2026-01-01';
+    })
+    .sort((a, b) => {
+      const dateA = a.transaction_date || a.created_at.split('T')[0];
+      const dateB = b.transaction_date || b.created_at.split('T')[0];
+      return new Date(dateA).getTime() - new Date(dateB).getTime();
+    });
 
   return (
     <motion.div 
@@ -1091,7 +1428,7 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
         <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
           <h3 className="font-semibold text-lg flex items-center gap-2 mb-6">
             <PieChart className="w-5 h-5 text-indigo-400" />
-            Capital Distribution
+            Total Capital Share Distribution
           </h3>
           <div className="h-80 w-full">
             <ResponsiveContainer width="100%" height="100%">
@@ -1132,7 +1469,7 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
           <FileText className="w-5 h-5 text-blue-400" />
           Financial Position Summary
         </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
             <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Assets</p>
             <p className="text-2xl font-mono text-white">
@@ -1141,11 +1478,18 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
             <p className="text-[10px] text-zinc-500 mt-2 italic">Bank + Hand + Lending</p>
           </div>
           <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
+            <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Liquid Asset</p>
+            <p className="text-2xl font-mono text-emerald-400">
+              ${((sourceFunds['BANK']?.balance || 0) + (sourceFunds['HAND']?.balance || 0)).toLocaleString()}
+            </p>
+            <p className="text-[10px] text-zinc-500 mt-2 italic">Bank + Cash on Hand</p>
+          </div>
+          <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
             <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Liabilities (Equity)</p>
             <p className="text-2xl font-mono text-white">
               ${(masterNodes['CAPITAL']?.balance || 0).toLocaleString()}
             </p>
-            <p className="text-[10px] text-zinc-500 mt-2 italic">Member Capital Shares</p>
+            <p className="text-[10px] text-zinc-500 mt-2 italic">Member Total Capital Shares</p>
           </div>
           <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
             <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Net Reserve</p>
@@ -1159,302 +1503,326 @@ function ReportsTab({ transactions, masterNodes, members, sourceFunds }: { trans
             <p className="text-2xl font-mono text-blue-400">
               {(((sourceFunds['BANK']?.balance || 0) + (sourceFunds['HAND']?.balance || 0)) / (masterNodes['CAPITAL']?.balance || 1) * 100).toFixed(1)}%
             </p>
-            <p className="text-[10px] text-zinc-500 mt-2 italic">Cash / Total Capital</p>
+            <p className="text-[10px] text-zinc-500 mt-2 italic">Cash / Total Capital Share</p>
           </div>
+        </div>
+      </div>
+
+      {/* Detailed Financial Timeline */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="font-semibold text-lg flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-400" />
+            Detailed Financial Timeline (2026 Onwards)
+          </h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left">
+            <thead className="text-xs text-zinc-500 uppercase bg-zinc-950/50 border-y border-zinc-800">
+              <tr>
+                <th className="px-4 py-3 font-medium">Date</th>
+                <th className="px-4 py-3 font-medium">Type</th>
+                <th className="px-4 py-3 font-medium">Category</th>
+                <th className="px-4 py-3 font-medium">Master Node</th>
+                <th className="px-4 py-3 font-medium">Source Fund</th>
+                <th className="px-4 py-3 font-medium text-right">Amount</th>
+                <th className="px-4 py-3 font-medium">Member</th>
+                <th className="px-4 py-3 font-medium">Description</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {timelineTxs.map(t => (
+                <tr key={t.id} className="hover:bg-zinc-800/20 transition-colors">
+                  <td className="px-4 py-3 whitespace-nowrap text-zinc-300">
+                    {t.transaction_date || t.created_at.split('T')[0]}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={clsx(
+                      "px-2 py-1 rounded-full text-[10px] font-bold tracking-wider",
+                      t.type === 'INFLOW' ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"
+                    )}>
+                      {t.type}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-zinc-300">{t.node_category}</td>
+                  <td className="px-4 py-3 text-zinc-400 text-xs">{t.parent_master_node}</td>
+                  <td className="px-4 py-3 text-zinc-400 text-xs">{t.source_fund || '-'}</td>
+                  <td className="px-4 py-3 text-right font-mono text-white">
+                    ${t.amount.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3 text-zinc-400 text-xs">
+                    {members.find(m => m.uid === t.member_id)?.name || 'System'}
+                  </td>
+                  <td className="px-4 py-3 text-zinc-400 text-xs max-w-xs truncate" title={t.description || ''}>
+                    {t.description || '-'}
+                  </td>
+                </tr>
+              ))}
+              {timelineTxs.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
+                    No transactions found from 2026 onwards.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </motion.div>
   );
 }
 
-function AdminTab({ nodeRegistry, masterNodes, showToast }: { nodeRegistry: NodeRegistry[], masterNodes: Record<string, MasterNode>, showToast: (msg: string, type?: 'success' | 'error') => void }) {
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [isAiProcessing, setIsAiProcessing] = useState(false);
-  const [showAddNode, setShowAddNode] = useState(false);
-  const [newNodeName, setNewNodeName] = useState('');
-  const [newParentNode, setNewParentNode] = useState<'INCOME' | 'EXPENSES' | 'LENDING' | 'CAPITAL'>('INCOME');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+function ExportTab({ transactions, masterNodes, members, sourceFunds }: { transactions: Transaction[], masterNodes: Record<string, MasterNode>, members: Member[], sourceFunds: Record<string, SourceFund> }) {
+  const handleExportTransactions = () => {
+    const headers = ['Date', 'Type', 'Category', 'Master Node', 'Source Fund', 'Amount', 'Member ID', 'Status', 'Description'];
+    const rows = transactions.map(t => [
+      t.transaction_date || t.created_at.split('T')[0],
+      t.type,
+      t.node_category,
+      t.parent_master_node,
+      t.source_fund || '',
+      t.amount.toString(),
+      t.member_id,
+      t.status,
+      t.description || ''
+    ]);
 
-  const handleAiCreate = async () => {
-    if (!aiPrompt.trim()) return;
-    setIsAiProcessing(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY || '' });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `You are a system administrator for a cooperative finance app. 
-        The user wants to create a new category node. 
-        Current Master Nodes: INCOME, EXPENSES, LENDING, CAPITAL.
-        User Request: "${aiPrompt}"
-        Return a JSON object with:
-        {
-          "id": "slug_id",
-          "name": "Display Name",
-          "parent_master_node": "ONE_OF_THE_MASTER_NODES",
-          "description": "Short explanation"
-        }
-        Only return the JSON.`,
-        config: { responseMimeType: "application/json" }
-      });
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
 
-      const result = JSON.parse(response.text || '{}');
-      if (result.id && result.parent_master_node) {
-        await setDoc(doc(db, 'node_registry', result.id), {
-          ...result,
-          created_at: new Date().toISOString()
-        });
-        setAiPrompt('');
-        showToast(`Node "${result.name}" created successfully under ${result.parent_master_node}.`);
-      }
-    } catch (e: any) {
-      showToast("AI Processing failed: " + e.message, 'error');
-    } finally {
-      setIsAiProcessing(false);
-    }
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `transactions_export_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
-  const handleAddNode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newNodeName) return;
-    setIsSubmitting(true);
-    try {
-      const id = newNodeName.toLowerCase().replace(/\s+/g, '_');
-      await setDoc(doc(db, 'node_registry', id), {
-        id,
-        name: newNodeName,
-        parent_master_node: newParentNode,
-        created_at: new Date().toISOString()
-      });
-      setNewNodeName('');
-      setShowAddNode(false);
-    } catch (error: any) {
-      showToast("Failed to add node: " + error.message, 'error');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  const handleExportMembers = () => {
+    const headers = ['UID', 'Name', 'Email', 'Role', 'Capital Share', 'Total Capital Share', 'Loan Balance', 'Capital Build Up', 'Refund', 'Dividend'];
+    const rows = members.map(m => [
+      m.uid,
+      m.name,
+      m.email,
+      m.role,
+      (m.capital_share || 0).toString(),
+      (m.total_capital_share || 0).toString(),
+      (m.loan_balance || 0).toString(),
+      (m.capital_build_up || 0).toString(),
+      (m.refund || 0).toString(),
+      (m.dividend || 0).toString()
+    ]);
 
-  const widgetMap = [
-    { tab: 'Dashboard', widgets: ['Liquidity Header', 'Master Node Grid', 'Verification Queue'] },
-    { tab: 'Income', widgets: ['Income Balance Card', 'Verified Ledger'] },
-    { tab: 'Expenses', widgets: ['Expenses Balance Card', 'Verified Ledger'] },
-    { tab: 'Lending', widgets: ['Lending Balance Card', 'Verified Ledger'] },
-    { tab: 'Member Directory', widgets: ['Member List', 'Debt-to-Equity Gauge', 'Member Transaction Ledger'] },
-    { tab: 'Transaction', widgets: ['Dual-Check Input Form'] },
-    { tab: 'Admin', widgets: ['Active Nodes Dictionary', 'AI Node Creator', 'Inventory Management'] },
-  ];
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
 
-  const masterNodeExplanations: Record<string, string> = {
-    'LENDING': 'Tracks total outstanding loans given to members. Increases on disbursement, decreases on payment.',
-    'INCOME': 'Tracks total revenue (fees, interest, etc.). Increases on inflow.',
-    'EXPENSES': 'Tracks total outflows (rent, salaries, etc.). Increases on outflow.',
-    'CAPITAL': 'Tracks total member equity/shares. Increases on deposit, decreases on withdrawal/dividend.'
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `members_export_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
     <motion.div 
       initial={{ opacity: 0, y: 10 }} 
       animate={{ opacity: 1, y: 0 }} 
-      className="space-y-8 pb-20"
+      className="space-y-6"
     >
-      {/* AI Node Creator */}
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="p-5 border-b border-zinc-800 flex items-center justify-between">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-amber-400" />
-            AI Node Creator
-          </h3>
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
+        <div className="p-6 border-b border-zinc-800">
+          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            <FileSpreadsheet className="w-6 h-6 text-emerald-400" />
+            Data Export
+          </h2>
+          <p className="text-zinc-400 text-sm mt-1">Export your financial data to CSV format for Excel or other spreadsheet software.</p>
         </div>
-        <div className="p-5">
-          <p className="text-sm text-zinc-400 mb-4">Tell the system what kind of node you want to create. For example: &quot;I want to create a merchandise node for selling coop products.&quot;</p>
-          <div className="flex gap-3">
-            <input 
-              type="text" 
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              placeholder="Describe the node..."
-              className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-            />
+
+        <div className="p-6 space-y-6">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4 p-4 rounded-xl bg-zinc-950 border border-zinc-800">
+            <div>
+              <p className="font-bold text-white">Export Transactions Ledger</p>
+              <p className="text-sm text-zinc-400">Download a complete history of all verified and pending transactions.</p>
+            </div>
             <button 
-              onClick={handleAiCreate}
-              disabled={isAiProcessing || !aiPrompt.trim()}
-              className="bg-amber-500 hover:bg-amber-600 text-black font-bold px-6 py-3 rounded-xl transition-all disabled:opacity-50 flex items-center gap-2"
+              onClick={handleExportTransactions}
+              className="px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30"
             >
-              {isAiProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
-              Create
+              <Download className="w-5 h-5" />
+              Download CSV
+            </button>
+          </div>
+
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4 p-4 rounded-xl bg-zinc-950 border border-zinc-800">
+            <div>
+              <p className="font-bold text-white">Export Member Directory</p>
+              <p className="text-sm text-zinc-400">Download a list of all members and their current equity and loan balances.</p>
+            </div>
+            <button 
+              onClick={handleExportMembers}
+              className="px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/30"
+            >
+              <Download className="w-5 h-5" />
+              Download CSV
             </button>
           </div>
         </div>
       </div>
-
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="p-5 border-b border-zinc-800 flex items-center justify-between">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <ShieldAlert className="w-5 h-5 text-indigo-400" />
-            Active Nodes Dictionary
-          </h3>
-          <button 
-            onClick={() => setShowAddNode(true)}
-            className="text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 py-1.5 px-3 rounded-lg border border-zinc-700 transition-colors flex items-center gap-2"
-          >
-            <Plus className="w-4 h-4" />
-            Manual Add
-          </button>
-        </div>
-        <div className="p-5 space-y-6">
-          <div>
-            <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-3">Master Nodes</h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {Object.values(masterNodes).map(node => (
-                <div key={node.id} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
-                  <p className="font-medium text-white mb-1">{node.id} <span className="text-xs text-zinc-500 font-mono ml-2">({node.id})</span></p>
-                  <p className="text-sm text-zinc-400">{masterNodeExplanations[node.id] || 'System master node.'}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-          
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-wider">Node Registry (Categories)</h4>
-              <button 
-                onClick={async () => {
-                  const defaults = [
-                    { id: 'loan_payment', name: 'Loan Payment', parent_master_node: 'LENDING' },
-                    { id: 'loan_disbursement', name: 'Loan Disbursement', parent_master_node: 'LENDING' },
-                    { id: 'capital_deposit', name: 'Capital Deposit', parent_master_node: 'CAPITAL' },
-                    { id: 'management_fee', name: 'Management Fee', parent_master_node: 'INCOME' },
-                    { id: 'refund', name: 'Refund Capital', parent_master_node: 'CAPITAL' },
-                  ];
-                  try {
-                    const toDelete = ['late_fee', 'dividend_payout'];
-                    for (const id of toDelete) {
-                      await deleteDoc(doc(db, 'node_registry', id));
-                    }
-                    for (const d of defaults) {
-                      await setDoc(doc(db, 'node_registry', d.id), { ...d, created_at: new Date().toISOString() }, { merge: true });
-                    }
-                    showToast("Default categories synced and cleaned successfully.");
-                  } catch (e: any) {
-                    showToast("Sync failed: " + e.message, 'error');
-                  }
-                }}
-                className="text-xs bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 py-1 px-3 rounded-lg border border-indigo-500/20 transition-colors"
-              >
-                Sync & Cleanup Defaults
-              </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {nodeRegistry.map(node => (
-                <div key={node.id} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 group relative">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="font-medium text-white">{node.name}</p>
-                    <span className="text-xs px-2 py-1 bg-zinc-800 text-zinc-300 rounded-md">{node.parent_master_node}</span>
-                  </div>
-                  <p className="text-sm text-zinc-400">Maps transactions to the {node.parent_master_node} master node.</p>
-                  <button 
-                    onClick={async () => {
-                      await deleteDoc(doc(db, 'node_registry', node.id));
-                      showToast(`Deleted category "${node.name}"`);
-                    }}
-                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-rose-500 transition-all"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="p-5 border-b border-zinc-800">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <LayoutDashboard className="w-5 h-5 text-indigo-400" />
-            Active Widget Map
-          </h3>
-        </div>
-        <div className="p-5">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {widgetMap.map(tab => (
-              <div key={tab.tab} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800">
-                <p className="font-medium text-white mb-3 border-b border-zinc-800 pb-2">{tab.tab}</p>
-                <ul className="space-y-2">
-                  {tab.widgets.map(w => (
-                    <li key={w} className="text-sm text-zinc-400 flex items-center gap-2">
-                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-500/50"></div>
-                      {w}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <AnimatePresence>
-        {showAddNode && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-md shadow-2xl"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-white">Add Node Category</h3>
-                <button 
-                  onClick={() => setShowAddNode(false)}
-                  className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-full transition-colors"
-                >
-                  <XCircle className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <form onSubmit={handleAddNode} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-300 mb-2">Category Name</label>
-                  <input 
-                    type="text" 
-                    value={newNodeName}
-                    onChange={(e) => setNewNodeName(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-                    placeholder="e.g. Office Supplies"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-300 mb-2">Parent Master Node</label>
-                  <select 
-                    value={newParentNode}
-                    onChange={(e) => setNewParentNode(e.target.value as any)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-                  >
-                    <option value="INCOME">INCOME</option>
-                    <option value="EXPENSES">EXPENSES</option>
-                    <option value="LENDING">LENDING</option>
-                    <option value="CAPITAL">CAPITAL</option>
-                  </select>
-                </div>
-                <button 
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-3 rounded-xl transition-colors disabled:opacity-50"
-                >
-                  {isSubmitting ? 'Creating...' : 'Create Category'}
-                </button>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </motion.div>
   );
 }
 
-function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, setActiveTab }: { masterNodes: Record<string, MasterNode>, transactions: Transaction[], isAdmin: boolean, members: Member[], showToast: (msg: string, type?: 'success' | 'error') => void, setActiveTab: (tab: any) => void }) {
+function AdminTab({ nodeRegistry, masterNodes, members, transactions, showToast }: { nodeRegistry: NodeRegistry[], masterNodes: Record<string, MasterNode>, members: Member[], transactions: Transaction[], showToast: (msg: string, type?: 'success' | 'error') => void }) {
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleRestorePoint = async () => {
+    if (!confirmReset) {
+      setConfirmReset(true);
+      setTimeout(() => setConfirmReset(false), 5000);
+      return;
+    }
+
+    setIsResetting(true);
+    try {
+      const batch = writeBatch(db);
+
+      // 1. Delete all transactions
+      for (const tx of transactions) {
+        batch.delete(doc(db, 'transactions', tx.id));
+      }
+
+      // 2. Reset Source Funds
+      batch.update(doc(db, 'source_funds', 'BANK'), { balance: 1093762.24, updated_at: new Date().toISOString() });
+      batch.update(doc(db, 'source_funds', 'HAND'), { balance: 175570.00, updated_at: new Date().toISOString() });
+
+      // 3. Reset Master Nodes
+      batch.update(doc(db, 'master_nodes', 'CAPITAL'), { balance: 981800.00, updated_at: new Date().toISOString() });
+      batch.update(doc(db, 'master_nodes', 'INCOME'), { balance: 111962.24, updated_at: new Date().toISOString() });
+      batch.update(doc(db, 'master_nodes', 'EXPENSES'), { balance: 0, updated_at: new Date().toISOString() });
+      batch.update(doc(db, 'master_nodes', 'LENDING'), { balance: 0, updated_at: new Date().toISOString() });
+
+      // 4. Create the 3 base transactions
+      const tx1Ref = doc(collection(db, 'transactions'));
+      batch.set(tx1Ref, {
+        id: tx1Ref.id,
+        type: 'INFLOW',
+        source_fund: 'BANK',
+        node_category: 'Capital Share',
+        parent_master_node: 'CAPITAL',
+        amount: 981800.00,
+        member_id: 'SYSTEM',
+        status: 'VERIFIED',
+        created_by: 'system',
+        created_at: '2025-12-31T23:59:59.000Z',
+        verified_at: new Date().toISOString(),
+        verified_by: 'system',
+        transaction_date: '2025-12-31',
+        description: 'Starting Capital Share'
+      });
+
+      const tx2Ref = doc(collection(db, 'transactions'));
+      batch.set(tx2Ref, {
+        id: tx2Ref.id,
+        type: 'INFLOW',
+        source_fund: 'BANK',
+        node_category: 'Retained Earnings (Pre-2026)',
+        parent_master_node: 'INCOME',
+        amount: 111962.24,
+        member_id: 'SYSTEM',
+        status: 'VERIFIED',
+        created_by: 'system',
+        created_at: '2025-12-31T23:59:59.000Z',
+        verified_at: new Date().toISOString(),
+        verified_by: 'system',
+        transaction_date: '2025-12-31',
+        description: 'Starting Retained Earnings'
+      });
+
+      const tx3Ref = doc(collection(db, 'transactions'));
+      batch.set(tx3Ref, {
+        id: tx3Ref.id,
+        type: 'INFLOW',
+        source_fund: 'HAND',
+        node_category: 'Cash on Hand',
+        parent_master_node: 'INCOME', // Or Capital, but we'll put it in Income to balance
+        amount: 175570.00,
+        member_id: 'SYSTEM',
+        status: 'VERIFIED',
+        created_by: 'system',
+        created_at: '2025-12-31T23:59:59.000Z',
+        verified_at: new Date().toISOString(),
+        verified_by: 'system',
+        transaction_date: '2025-12-31',
+        description: 'Starting Cash on Hand'
+      });
+
+      await batch.commit();
+
+      showToast("System successfully restored to 2026 starting data.");
+      setConfirmReset(false);
+    } catch (error: any) {
+      showToast("Restore failed: " + error.message, 'error');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }} 
+      animate={{ opacity: 1, y: 0 }} 
+      className="space-y-6"
+    >
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
+        <div className="p-6 border-b border-zinc-800">
+          <h2 className="text-xl font-bold text-white">System Restore Point</h2>
+          <p className="text-zinc-400 text-sm mt-1">Reset the system to the exact starting data for 2026.</p>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4 p-4 rounded-xl bg-rose-600/10 border border-rose-600/30">
+            <div>
+              <p className="font-bold text-white">Restore to 2026 Starting Data</p>
+              <p className="text-sm text-zinc-400">
+                This will <span className="text-rose-400 font-bold">WIPE ALL TRANSACTIONS</span> and reset the balances to:<br/>
+                Bank: $1,093,762.24 | Cash on Hand: $175,570.00<br/>
+                Capital: $981,800.00 | Retained Earnings: $111,962.24
+              </p>
+            </div>
+            <button 
+              onClick={handleRestorePoint}
+              disabled={isResetting}
+              className={clsx(
+                "px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap",
+                confirmReset 
+                  ? "bg-rose-600 text-white shadow-lg shadow-rose-600/40" 
+                  : "bg-zinc-800 text-rose-500 hover:bg-rose-600/10 border border-rose-600/30"
+              )}
+            >
+              {isResetting ? <Loader2 className="w-5 h-5 animate-spin" /> : <RotateCcw className="w-5 h-5" />}
+              {confirmReset ? 'CONFIRM RESTORE' : 'Restore System'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, setActiveTab, sourceFunds }: { masterNodes: Record<string, MasterNode>, transactions: Transaction[], isAdmin: boolean, members: Member[], showToast: (msg: string, type?: 'success' | 'error') => void, setActiveTab: (tab: any) => void, sourceFunds: Record<string, SourceFund> }) {
   const pendingTxs = transactions.filter(t => t.status === 'PENDING');
   const verifiedTxs = transactions
     .filter(t => t.status === 'VERIFIED')
@@ -1471,18 +1839,42 @@ function DashboardTab({ masterNodes, transactions, isAdmin, members, showToast, 
     }
   };
 
+  const totalLiquidAsset = (sourceFunds['BANK']?.balance || 0) + (sourceFunds['HAND']?.balance || 0);
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 10 }} 
       animate={{ opacity: 1, y: 0 }} 
       className="space-y-8"
     >
+      {/* Liquid Asset Card */}
+      <div className="bg-gradient-to-br from-indigo-900/50 to-zinc-900 border border-indigo-500/30 rounded-2xl p-6 shadow-2xl relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none"></div>
+        <p className="text-sm font-medium text-indigo-300 uppercase tracking-wider mb-2 flex items-center gap-2">
+          <Wallet className="w-4 h-4" />
+          Total Liquid Asset
+        </p>
+        <p className="text-5xl font-mono font-bold tracking-tight text-white mb-4">
+          ${totalLiquidAsset.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        </p>
+        <div className="flex items-center gap-6 text-sm">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-emerald-400"></div>
+            <span className="text-zinc-400">Bank: <span className="text-white font-mono">${(sourceFunds['BANK']?.balance || 0).toLocaleString()}</span></span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-amber-400"></div>
+            <span className="text-zinc-400">Cash on Hand: <span className="text-white font-mono">${(sourceFunds['HAND']?.balance || 0).toLocaleString()}</span></span>
+          </div>
+        </div>
+      </div>
+
       {/* Master Node Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MasterNodeCard title="Lending" amount={masterNodes['LENDING']?.balance || 0} color="text-blue-400" />
         <MasterNodeCard title="Income" amount={masterNodes['INCOME']?.balance || 0} color="text-emerald-400" />
         <MasterNodeCard title="Expenses" amount={masterNodes['EXPENSES']?.balance || 0} color="text-rose-400" />
-        <MasterNodeCard title="Capital" amount={masterNodes['CAPITAL']?.balance || 0} color="text-purple-400" />
+        <MasterNodeCard title="Total Capital Share" amount={masterNodes['CAPITAL']?.balance || 0} color="text-purple-400" />
       </div>
 
       {/* Recent Transactions Section */}
@@ -1638,6 +2030,102 @@ function SidebarAutomation({ masterNodes, members, isAdmin, showToast }: { maste
 
   if (!isActuallyAdmin) return null;
 
+  const handleRecalculateBalances = async () => {
+    setIsImporting(true);
+    try {
+      // 1. Sum up all member capital
+      const totalCapital = members.reduce((sum, m) => sum + (m.total_capital_share || 0), 0);
+      const totalLoans = members.reduce((sum, m) => sum + (m.loan_balance || 0), 0);
+
+      // 2. Update Master Nodes
+      await updateDoc(doc(db, 'master_nodes', 'CAPITAL'), {
+        balance: totalCapital,
+        updated_at: new Date().toISOString()
+      });
+      await updateDoc(doc(db, 'master_nodes', 'LENDING'), {
+        balance: totalLoans,
+        updated_at: new Date().toISOString()
+      });
+
+      showToast("Master balances recalculated from member data.");
+    } catch (error: any) {
+      showToast("Recalculation failed: " + error.message, 'error');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleImportLedger = async () => {
+    setIsImporting(true);
+    try {
+      const { LEDGER_TRANSACTIONS } = await import('@/lib/ledger_data');
+      const batch = writeBatch(db);
+      
+      let currentHandBalance = 0;
+      let totalIncome = 0;
+      let totalExpenses = 0;
+
+      for (const tx of LEDGER_TRANSACTIONS) {
+        const txId = `ledger_${Math.random().toString(36).substr(2, 9)}`;
+        const txRef = doc(db, 'transactions', txId);
+        
+        if (tx.description === 'Beginning Balance') {
+          currentHandBalance = tx.balance || 0;
+          continue;
+        }
+
+        const type = tx.debit > 0 ? 'INFLOW' : 'OUTFLOW';
+        const amount = tx.debit > 0 ? tx.debit : tx.credit;
+        
+        if (type === 'INFLOW') {
+          totalIncome += amount;
+          currentHandBalance += amount;
+        } else {
+          totalExpenses += amount;
+          currentHandBalance -= amount;
+        }
+
+        batch.set(txRef, {
+          id: txId,
+          type,
+          amount,
+          description: tx.description,
+          source_fund: 'HAND',
+          node_category: tx.splitAccount || (type === 'INFLOW' ? 'INCOME' : 'EXPENSES'),
+          parent_master_node: type === 'INFLOW' ? 'INCOME' : 'EXPENSES',
+          member_id: 'SYSTEM',
+          status: 'VERIFIED',
+          created_by: auth.currentUser?.uid || 'system',
+          created_at: new Date(tx.date).toISOString(),
+          verified_at: new Date().toISOString(),
+          verified_by: auth.currentUser?.uid || 'system'
+        });
+      }
+
+      batch.update(doc(db, 'source_funds', 'HAND'), {
+        balance: currentHandBalance,
+        updated_at: new Date().toISOString()
+      });
+
+      // Update Master Nodes
+      batch.update(doc(db, 'master_nodes', 'INCOME'), {
+        balance: totalIncome,
+        updated_at: new Date().toISOString()
+      });
+      batch.update(doc(db, 'master_nodes', 'EXPENSES'), {
+        balance: totalExpenses,
+        updated_at: new Date().toISOString()
+      });
+
+      await batch.commit();
+      showToast(`Successfully imported ${LEDGER_TRANSACTIONS.length} ledger transactions.`);
+    } catch (error: any) {
+      showToast("Ledger import failed: " + error.message, 'error');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const handleImportInitialData = async () => {
     if (!confirmImport) {
       setConfirmImport(true);
@@ -1650,18 +2138,42 @@ function SidebarAutomation({ masterNodes, members, isAdmin, showToast }: { maste
     try {
       const { INITIAL_MEMBERS } = await import('@/lib/initial_members');
       
+      let totalImportedCapital = 0;
+
       for (const memberData of INITIAL_MEMBERS) {
         const uid = `user_${Math.random().toString(36).substr(2, 9)}`;
+        const capital = memberData.total_capital_share || 0;
+        totalImportedCapital += capital;
+
         await setDoc(doc(db, 'members', uid), {
           ...memberData,
           uid,
           loan_balance: 0,
-          total_capital_share: memberData.total_capital_share || 0,
+          capital_share: capital,
+          total_capital_share: capital,
           created_at: new Date().toISOString()
         });
       }
+
+      // Update CAPITAL master node balance
+      const capitalRef = doc(db, 'master_nodes', 'CAPITAL');
+      const capitalDoc = await getDoc(capitalRef);
       
-      showToast(`Successfully imported ${INITIAL_MEMBERS.length} members.`);
+      if (capitalDoc.exists()) {
+        const currentBal = capitalDoc.data()?.balance || 0;
+        await updateDoc(capitalRef, {
+          balance: currentBal + totalImportedCapital,
+          updated_at: new Date().toISOString()
+        });
+      } else {
+        await setDoc(capitalRef, {
+          id: 'CAPITAL',
+          balance: totalImportedCapital,
+          updated_at: new Date().toISOString()
+        });
+      }
+      
+      showToast(`Successfully imported ${INITIAL_MEMBERS.length} members and updated Capital node by $${totalImportedCapital.toLocaleString()}.`);
     } catch (error: any) {
       showToast("Import failed: " + error.message, 'error');
     } finally {
@@ -1682,6 +2194,24 @@ function SidebarAutomation({ masterNodes, members, isAdmin, showToast }: { maste
         >
           {isImporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
           {isImporting ? 'Importing...' : confirmImport ? 'Click Again to Confirm' : 'Import Masterlist Data'}
+        </button>
+
+        <button 
+          onClick={handleRecalculateBalances}
+          disabled={isImporting}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-bold text-indigo-400 hover:text-white hover:border-indigo-900/50 transition-all disabled:opacity-50"
+        >
+          <RefreshCw className={clsx("w-3 h-3", isImporting && "animate-spin")} />
+          Recalculate Master Balances
+        </button>
+
+        <button 
+          onClick={handleImportLedger}
+          disabled={isImporting}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-bold text-amber-400 hover:text-white hover:border-amber-900/50 transition-all disabled:opacity-50"
+        >
+          <FileText className="w-3 h-3" />
+          Import Ledger Transactions
         </button>
       </div>
     </div>
@@ -1711,7 +2241,29 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
   const [source, setSource] = useState<'BANK' | 'HAND' | ''>('');
   const [nodeCat, setNodeCat] = useState('');
   const [amount, setAmount] = useState('');
+  const [transactionDate, setTransactionDate] = useState(new Date().toISOString().split('T')[0]);
   const [isTxSubmitting, setIsTxSubmitting] = useState(false);
+  const [confirmDeleteMember, setConfirmDeleteMember] = useState(false);
+
+  const totalCapitalShare = members.reduce((sum, m) => sum + (m.total_capital_share || 0), 0);
+  const totalLoanBalance = members.reduce((sum, m) => sum + (m.loan_balance || 0), 0);
+
+  const handleDeleteMember = async (uid: string) => {
+    if (!confirmDeleteMember) {
+      setConfirmDeleteMember(true);
+      setTimeout(() => setConfirmDeleteMember(false), 3000);
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'members', uid));
+      showToast("Member deleted successfully.");
+      setSelectedMember(null);
+      setConfirmDeleteMember(false);
+    } catch (error: any) {
+      showToast("Delete failed: " + error.message, 'error');
+    }
+  };
 
   // Filter categories based on transaction type
   const filteredCategories = nodeRegistry.filter(node => {
@@ -1770,7 +2322,9 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
         member_id: selectedMember.uid,
         status: 'PENDING',
         created_by: currentUser?.uid || '',
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        transaction_date: transactionDate,
+        description: ''
       };
 
       const isAdminUser = currentUser?.role === 'admin' || currentUser?.email === 'century.decadee@gmail.com' || currentUser?.email === 'ronald.narvasa.rn@gmail.com';
@@ -1801,6 +2355,23 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
       animate={{ opacity: 1, y: 0 }} 
       className="space-y-6"
     >
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 relative overflow-hidden group">
+          <p className="text-sm text-zinc-400 font-medium uppercase tracking-wider mb-2">Total Capital Share</p>
+          <p className="text-3xl font-mono font-bold text-emerald-400">${totalCapitalShare.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+          <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:opacity-10 transition-opacity">
+            <Users className="w-32 h-32" />
+          </div>
+        </div>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 relative overflow-hidden group">
+          <p className="text-sm text-zinc-400 font-medium uppercase tracking-wider mb-2">Total Outstanding Loans</p>
+          <p className="text-3xl font-mono font-bold text-rose-400">${totalLoanBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+          <div className="absolute -right-4 -bottom-4 opacity-5 group-hover:opacity-10 transition-opacity">
+            <Activity className="w-32 h-32" />
+          </div>
+        </div>
+      </div>
+
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden flex flex-col">
         <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
           <div>
@@ -1860,7 +2431,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
-                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-0.5">Total Capital</p>
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-0.5">Total Capital Share</p>
                       <p className="text-sm font-mono text-emerald-400">${(member.total_capital_share || 0).toLocaleString()}</p>
                     </div>
                     <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
@@ -1878,7 +2449,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                   <tr className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold border-b border-zinc-800">
                     <th className="px-4 py-3">Member</th>
                     <th className="px-4 py-3">Role</th>
-                    <th className="px-4 py-3 text-right">Total Capital</th>
+                    <th className="px-4 py-3 text-right">Total Capital Share</th>
                     <th className="px-4 py-3 text-right">Loan Balance</th>
                     <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
@@ -1951,6 +2522,18 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                 
                 <div className="flex items-center gap-4">
                   <button 
+                    onClick={() => handleDeleteMember(selectedMember.uid)}
+                    className={clsx(
+                      "font-medium py-2.5 px-4 rounded-xl transition-all flex items-center gap-2 border",
+                      confirmDeleteMember 
+                        ? "bg-rose-500 text-white border-rose-500 shadow-lg shadow-rose-500/20" 
+                        : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-rose-400 hover:border-rose-500/50"
+                    )}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    {confirmDeleteMember ? 'Confirm Delete' : 'Delete'}
+                  </button>
+                  <button 
                     onClick={() => {
                       setType('INFLOW');
                       setNodeCat('');
@@ -1991,7 +2574,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                     </div>
                     <div className="w-full grid grid-cols-2 gap-4">
                       <div className="text-center">
-                        <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">Total Capital</p>
+                        <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">Total Capital Share</p>
                         <p className="font-mono text-emerald-400 text-lg">${(selectedMember.total_capital_share || 0).toLocaleString()}</p>
                       </div>
                       <div className="text-center">
@@ -2022,7 +2605,7 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                     </div>
 
                     <div className="bg-zinc-950 p-4 rounded-2xl border border-zinc-800">
-                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-2">Capital Breakdown</p>
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold mb-2">Total Capital Share Breakdown</p>
                       <div className="space-y-2">
                         <div className="flex justify-between">
                           <p className="text-xs text-zinc-400">Base Share</p>
@@ -2282,6 +2865,17 @@ function MembersTab({ members, transactions, nodeRegistry, currentUser, showToas
                         placeholder="0.00"
                       />
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-300 mb-2">Transaction Date <span className="text-rose-500">*</span></label>
+                    <input 
+                      type="date" 
+                      required
+                      value={transactionDate}
+                      onChange={(e) => setTransactionDate(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                    />
                   </div>
                 </div>
 

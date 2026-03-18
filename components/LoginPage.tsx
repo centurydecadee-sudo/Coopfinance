@@ -86,6 +86,27 @@ export default function LoginPage() {
         >
           {isLogin ? 'Need an account? Register' : 'Already have an account? Login'}
         </button>
+
+        <div className="mt-8 pt-6 border-t border-zinc-800">
+          <p className="text-xs text-zinc-500 text-center mb-4 uppercase tracking-widest">System Setup</p>
+          <button
+            onClick={async () => {
+              try {
+                await createUserWithEmailAndPassword(auth, 'admin@gmail.com', 'admin');
+                alert("Admin account created! You can now login with admin@gmail.com / admin");
+              } catch (e: any) {
+                if (e.code === 'auth/email-already-in-use') {
+                  alert("Admin account already exists. Try logging in.");
+                } else {
+                  alert("Setup failed: " + e.message);
+                }
+              }
+            }}
+            className="w-full py-2 px-4 rounded-xl border border-indigo-500/30 text-indigo-400 text-xs font-bold hover:bg-indigo-500/10 transition-all"
+          >
+            Setup Admin Account (admin@gmail.com)
+          </button>
+        </div>
       </div>
     </div>
   );
